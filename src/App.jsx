@@ -819,19 +819,19 @@ export default function App() {
     <div style={S.page}>
       {/* Header */}
       <div style={S.header}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flex: 1 }}>
           <button onClick={() => { setCurrentInvoice(null); setTransactions([]); }}
-            style={{ background: "transparent", border: "none", cursor: "pointer", fontSize: 18, color: "#64748b", padding: "0 4px" }}
+            style={{ background: "transparent", border: "none", cursor: "pointer", fontSize: 18, color: "#64748b", padding: "0 4px", flexShrink: 0 }}
             title="Voltar">←</button>
-          <span style={{ fontWeight: 800, fontSize: 16, color: "#0f172a" }}>💳 {currentInvoice.name || "Fatura"}</span>
-          <span style={S.chip}>{transactions.length} lançamentos</span>
+          <span style={{ fontWeight: 800, fontSize: 16, color: "#0f172a", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>💳 {currentInvoice.name || "Fatura"}</span>
+          <span style={{ ...S.chip, flexShrink: 0 }}>{transactions.length} lançamentos</span>
           {semCategoria > 0 && (
-            <span style={{ ...S.chip, background: "#fff7ed", color: "#c2410c", border: "1px solid #fed7aa" }}>
+            <span style={{ ...S.chip, background: "#fff7ed", color: "#c2410c", border: "1px solid #fed7aa", flexShrink: 0 }}>
               {semCategoria} sem categoria
             </span>
           )}
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
           <ExportMenu transactions={transactions} filtered={filtered} filter={filter} />
           <label style={S.newBtn}>
             📂 Nova fatura
@@ -944,7 +944,7 @@ export default function App() {
 // ─── Styles ──────────────────────────────────────────────────────────────────
 const S = {
   page: { minHeight: "100vh", background: "#f8fafc", fontFamily: "'Segoe UI', system-ui, sans-serif" },
-  header: { background: "#fff", borderBottom: "1px solid #e2e8f0", padding: "12px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, position: "sticky", top: 0, zIndex: 100 },
+  header: { background: "#fff", borderBottom: "1px solid #e2e8f0", padding: "12px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, position: "sticky", top: 0, zIndex: 100 },
   chip: { background: "#f1f5f9", color: "#64748b", border: "1px solid #e2e8f0", padding: "3px 10px", borderRadius: 20, fontSize: 12, fontWeight: 600 },
   newBtn: { display: "inline-block", background: "#f1f5f9", color: "#334155", border: "1px solid #e2e8f0", padding: "7px 16px", borderRadius: 8, cursor: "pointer", fontWeight: 600, fontSize: 13 },
   filterBar: { background: "#fff", borderBottom: "1px solid #e2e8f0", padding: "10px 20px" },
@@ -952,7 +952,7 @@ const S = {
   tab: { padding: "4px 12px", borderRadius: 20, border: "1px solid #e2e8f0", background: "transparent", color: "#64748b", cursor: "pointer", fontSize: 12, fontWeight: 600 },
   tabOn: { background: "#eff6ff", color: "#1d4ed8", borderColor: "#bfdbfe" },
   table: { width: "100%", borderCollapse: "collapse", minWidth: 560, background: "#fff" },
-  th: { padding: "10px 14px", textAlign: "left", fontSize: 11, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.06em", borderBottom: "2px solid #e2e8f0", background: "#f8fafc", position: "sticky", top: 53 },
+  th: { padding: "10px 14px", textAlign: "left", fontSize: 11, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.06em", borderBottom: "2px solid #e2e8f0", background: "#f8fafc" },
   row: { borderBottom: "1px solid #f1f5f9", transition: "background 0.1s", background: "#fff" },
   td: { padding: "10px 14px", verticalAlign: "middle" },
   footer: { background: "#fff", borderTop: "1px solid #e2e8f0", padding: "12px 20px", display: "flex", justifyContent: "space-between", alignItems: "center", position: "sticky", bottom: 0 },
