@@ -1,7 +1,9 @@
 import { useState, useCallback, useRef, useEffect } from "react";
+import { supabase } from "./lib/supabase";
+import Auth from "./components/Auth";
 
-// ─── Auto-categorization rules ───────────────────────────────────────────────
-const AUTO_RULES = [
+// ─── Default auto-categorization rules (seeded on first login) ──────────────
+const DEFAULT_RULES = [
   { keywords: ["mercadolivre", "mercado livre", "mp*mercadoliv"], category: "Compras Online" },
   { keywords: ["hotmart", "htm "], category: "Educação" },
   { keywords: ["adobe"], category: "Ferramenta" },
@@ -66,38 +68,17 @@ const AUTO_RULES = [
   { keywords: ["scp estacionamento"], category: "Viagem" },
 ];
 
-function autoCategorizeMemo(memo) {
-  const lower = memo.toLowerCase();
-  for (const rule of AUTO_RULES) {
-    if (rule.keywords.some(kw => lower.includes(kw.toLowerCase()))) return rule.category;
-  }
-  return null;
-}
-
-// ─── OFX parser ──────────────────────────────────────────────────────────────
-function parseOFX(text) {
-  const transactions = [];
-  const stmtRegex = /<STMTTRN>([\s\S]*?)<\/STMTTRN>/g;
-  let m;
-  while ((m = stmtRegex.exec(text)) !== null) {
-    const block = m[1];
-    const get = (tag) => { const r = new RegExp(`<${tag}>([^<]*)`); const x = r.exec(block); return x ? x[1].trim() : ""; };
-    const tipo = get("TRNTYPE");
-    const memo = get("MEMO").replace(/&amp;/g, "&");
-    const amtRaw = parseFloat(get("TRNAMT").replace(",", "."));
-    const dateRaw = get("DTPOSTED");
-    const date = dateRaw ? `${dateRaw.slice(6,8)}/${dateRaw.slice(4,6)}/${dateRaw.slice(0,4)}` : "";
-    if (!memo || isNaN(amtRaw)) continue;
-    if (tipo === "CREDIT" && amtRaw > 0) continue;
-    const autoCategory = autoCategorizeMemo(memo);
-    transactions.push({ id: get("FITID"), memo, amount: Math.abs(amtRaw), date, category: autoCategory, auto: !!autoCategory });
-  }
-  return transactions;
-}
-
-function fmt(v) {
-  return new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(v);
-}
+const DEFAULT_CATEGORIES = [
+  { name: "Compras Online", colorIndex: 2 },
+  { name: "Educação", colorIndex: 3 },
+  { name: "Ferramenta", colorIndex: 4 },
+  { name: "Imposto", colorIndex: 9 },
+  { name: "Operacional", colorIndex: 6 },
+  { name: "PF - Rafa", colorIndex: 1 },
+  { name: "Taxa", colorIndex: 7 },
+  { name: "Tráfego Pago", colorIndex: 5 },
+  { name: "Viagem", colorIndex: 0 },
+];
 
 // ─── Colors ──────────────────────────────────────────────────────────────────
 const TAG_COLORS = [
@@ -117,6 +98,39 @@ const CAT_CHART_COLORS = [
   "#534AB7","#D4537E","#D85A30","#1D9E75","#378ADD",
   "#BA7517","#3B6D11","#E24B4A","#888780","#075985",
 ];
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+function autoCategorizeMemo(memo, rules) {
+  const lower = memo.toLowerCase();
+  for (const rule of rules) {
+    if (rule.keywords.some(kw => lower.includes(kw.toLowerCase()))) return rule.category;
+  }
+  return null;
+}
+
+function parseOFX(text, rules) {
+  const transactions = [];
+  const stmtRegex = /<STMTTRN>([\s\S]*?)<\/STMTTRN>/g;
+  let m;
+  while ((m = stmtRegex.exec(text)) !== null) {
+    const block = m[1];
+    const get = (tag) => { const r = new RegExp(`<${tag}>([^<]*)`); const x = r.exec(block); return x ? x[1].trim() : ""; };
+    const tipo = get("TRNTYPE");
+    const memo = get("MEMO").replace(/&amp;/g, "&");
+    const amtRaw = parseFloat(get("TRNAMT").replace(",", "."));
+    const dateRaw = get("DTPOSTED");
+    const date = dateRaw ? `${dateRaw.slice(6,8)}/${dateRaw.slice(4,6)}/${dateRaw.slice(0,4)}` : "";
+    if (!memo || isNaN(amtRaw)) continue;
+    if (tipo === "CREDIT" && amtRaw > 0) continue;
+    const autoCategory = autoCategorizeMemo(memo, rules);
+    transactions.push({ fit_id: get("FITID"), memo, amount: Math.abs(amtRaw), date, category: autoCategory, auto: !!autoCategory });
+  }
+  return transactions;
+}
+
+function fmt(v) {
+  return new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(v);
+}
 
 // ─── SheetJS loader ──────────────────────────────────────────────────────────
 let _xlsxReady = null;
@@ -172,7 +186,7 @@ function triggerDownload(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-// ─── ExportMenu ───────────────────────────────────────────────────────────────
+// ─── ExportMenu ──────────────────────────────────────────────────────────────
 function ExportMenu({ transactions, filtered, filter }) {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
@@ -290,7 +304,7 @@ function TagSelector({ value, categories, onChange, onAddCategory }) {
   );
 }
 
-// ─── Donut Chart (pure SVG) ───────────────────────────────────────────────────
+// ─── Donut Chart ─────────────────────────────────────────────────────────────
 function DonutChart({ entries, grandTotal }) {
   const size = 150, cx = 75, cy = 75, r = 56, inner = 34;
   if (!grandTotal) return null;
@@ -323,7 +337,7 @@ function DonutChart({ entries, grandTotal }) {
   );
 }
 
-// ─── Dashboard ────────────────────────────────────────────────────────────────
+// ─── Dashboard ───────────────────────────────────────────────────────────────
 function Dashboard({ transactions, categories, onFilterClick }) {
   const grandTotal = transactions.reduce((s, t) => s + t.amount, 0);
   const semCat = transactions.filter(t => !t.category).length;
@@ -359,7 +373,6 @@ function Dashboard({ transactions, categories, onFilterClick }) {
 
   return (
     <div style={{ padding: "20px" }}>
-      {/* Metric cards */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, marginBottom: 20 }}>
         {[
           { label: "Total gasto", value: fmt(grandTotal), sub: `${transactions.length} lançamentos` },
@@ -376,7 +389,6 @@ function Dashboard({ transactions, categories, onFilterClick }) {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 20, alignItems: "start" }}>
-        {/* Ranking */}
         <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, overflow: "hidden" }}>
           <div style={{ padding: "14px 18px 10px", borderBottom: "1px solid #f1f5f9", display: "flex", alignItems: "baseline", gap: 8 }}>
             <span style={{ fontWeight: 700, fontSize: 13, color: "#0f172a" }}>Ranking por categoria</span>
@@ -399,7 +411,6 @@ function Dashboard({ transactions, categories, onFilterClick }) {
           ))}
         </div>
 
-        {/* Donut + legend */}
         <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: "16px 18px", minWidth: 220 }}>
           <div style={{ fontWeight: 700, fontSize: 13, color: "#0f172a", marginBottom: 14 }}>Distribuição</div>
           <div style={{ display: "flex", justifyContent: "center", marginBottom: 16 }}>
@@ -422,45 +433,328 @@ function Dashboard({ transactions, categories, onFilterClick }) {
   );
 }
 
+// ─── Invoice History ─────────────────────────────────────────────────────────
+function InvoiceHistory({ invoices, loading, onSelect, onNew, onDelete }) {
+  return (
+    <div style={{ padding: 24, maxWidth: 700, margin: "0 auto" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
+        <div>
+          <h2 style={{ margin: "0 0 4px", fontSize: 20, fontWeight: 800, color: "#0f172a" }}>Suas faturas</h2>
+          <p style={{ margin: 0, fontSize: 13, color: "#64748b" }}>
+            {invoices.length === 0 ? "Nenhuma fatura importada ainda" : `${invoices.length} fatura${invoices.length !== 1 ? "s" : ""} importada${invoices.length !== 1 ? "s" : ""}`}
+          </p>
+        </div>
+        <label style={{
+          display: "inline-flex", alignItems: "center", gap: 8,
+          background: "#3b82f6", color: "#fff", padding: "10px 20px",
+          borderRadius: 10, cursor: "pointer", fontWeight: 700, fontSize: 14,
+        }}>
+          📂 Importar .OFX
+          <input type="file" accept=".ofx" style={{ display: "none" }} onChange={e => onNew(e.target.files?.[0])} />
+        </label>
+      </div>
+
+      {loading && (
+        <div style={{ textAlign: "center", padding: 40, color: "#94a3b8" }}>Carregando...</div>
+      )}
+
+      {!loading && invoices.length === 0 && (
+        <div style={{
+          background: "#fff", border: "2px dashed #e2e8f0", borderRadius: 16,
+          padding: "60px 24px", textAlign: "center",
+        }}>
+          <div style={{ fontSize: 48, marginBottom: 12 }}>💳</div>
+          <p style={{ margin: "0 0 8px", fontSize: 16, fontWeight: 700, color: "#0f172a" }}>
+            Importe sua primeira fatura
+          </p>
+          <p style={{ margin: 0, fontSize: 14, color: "#64748b" }}>
+            Arraste um arquivo .OFX ou clique no botão acima
+          </p>
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {invoices.map(inv => (
+          <div key={inv.id}
+            style={{
+              background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12,
+              padding: "16px 20px", display: "flex", alignItems: "center", gap: 16,
+              cursor: "pointer", transition: "all 0.15s",
+            }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = "#93c5fd"; e.currentTarget.style.boxShadow = "0 2px 12px rgba(59,130,246,0.08)"; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = "#e2e8f0"; e.currentTarget.style.boxShadow = "none"; }}
+            onClick={() => onSelect(inv)}
+          >
+            <div style={{
+              width: 44, height: 44, borderRadius: 10, background: "#eff6ff",
+              display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0,
+            }}>📋</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 700, fontSize: 14, color: "#0f172a", marginBottom: 2 }}>
+                {inv.name || "Fatura importada"}
+              </div>
+              <div style={{ fontSize: 12, color: "#94a3b8" }}>
+                {inv.transaction_count} lançamentos · {new Date(inv.imported_at).toLocaleDateString("pt-BR")}
+              </div>
+            </div>
+            <div style={{ textAlign: "right", flexShrink: 0 }}>
+              <div style={{ fontWeight: 800, fontSize: 16, color: "#0f172a" }}>{fmt(inv.total)}</div>
+            </div>
+            <button
+              onClick={(e) => { e.stopPropagation(); onDelete(inv.id); }}
+              style={{
+                background: "transparent", border: "none", cursor: "pointer",
+                color: "#cbd5e1", fontSize: 16, padding: "4px 8px", borderRadius: 6,
+              }}
+              onMouseEnter={e => e.currentTarget.style.color = "#ef4444"}
+              onMouseLeave={e => e.currentTarget.style.color = "#cbd5e1"}
+              title="Excluir fatura"
+            >✕</button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ─── App ─────────────────────────────────────────────────────────────────────
 export default function App() {
+  // Auth
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  // Data
   const [transactions, setTransactions] = useState([]);
-  const [categories, setCategories] = useState([
-    { name: "Compras Online",  color: TAG_COLORS[2] },
-    { name: "Educação",        color: TAG_COLORS[3] },
-    { name: "Ferramenta",      color: TAG_COLORS[4] },
-    { name: "Imposto",         color: TAG_COLORS[9] },
-    { name: "Operacional",     color: TAG_COLORS[6] },
-    { name: "PF - Rafa",       color: TAG_COLORS[1] },
-    { name: "Taxa",            color: TAG_COLORS[7] },
-    { name: "Tráfego Pago",    color: TAG_COLORS[5] },
-    { name: "Viagem",          color: TAG_COLORS[0] },
-  ]);
+  const [categories, setCategories] = useState([]);
+  const [autoRules, setAutoRules] = useState(DEFAULT_RULES);
+  const [invoices, setInvoices] = useState([]);
+  const [currentInvoice, setCurrentInvoice] = useState(null);
+  const [dataLoading, setDataLoading] = useState(false);
+
+  // UI
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
-  const [uploaded, setUploaded] = useState(false);
   const [activeTab, setActiveTab] = useState("lancamentos");
 
-  const handleFile = useCallback(async (file) => {
-    if (!file) return;
-    const text = await file.text();
-    const txs = parseOFX(text);
-    setTransactions(txs);
-    setUploaded(true);
-    setFilter("all");
-    setSearch("");
+  // ── Auth listener ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+      setAuthLoading(false);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
-  const addCategory = (name) => {
+  // ── Load user data on login ────────────────────────────────────────────────
+  useEffect(() => {
+    if (!user) return;
+    loadUserData();
+  }, [user]);
+
+  async function loadUserData() {
+    setDataLoading(true);
+
+    // Load categories
+    const { data: dbCats } = await supabase
+      .from("categories")
+      .select("*")
+      .order("created_at");
+
+    if (dbCats && dbCats.length > 0) {
+      setCategories(dbCats.map(c => ({
+        id: c.id,
+        name: c.name,
+        color: TAG_COLORS[c.color_index % TAG_COLORS.length],
+        colorIndex: c.color_index,
+      })));
+    } else {
+      // Seed defaults
+      const toInsert = DEFAULT_CATEGORIES.map(c => ({
+        user_id: user.id,
+        name: c.name,
+        color_index: c.colorIndex,
+      }));
+      const { data: inserted } = await supabase
+        .from("categories")
+        .insert(toInsert)
+        .select();
+      if (inserted) {
+        setCategories(inserted.map(c => ({
+          id: c.id,
+          name: c.name,
+          color: TAG_COLORS[c.color_index % TAG_COLORS.length],
+          colorIndex: c.color_index,
+        })));
+      }
+    }
+
+    // Load auto rules
+    const { data: dbRules } = await supabase
+      .from("auto_rules")
+      .select("*");
+
+    if (dbRules && dbRules.length > 0) {
+      setAutoRules(dbRules.map(r => ({ keywords: r.keywords, category: r.category })));
+    } else {
+      // Seed defaults
+      const toInsert = DEFAULT_RULES.map(r => ({
+        user_id: user.id,
+        keywords: r.keywords,
+        category: r.category,
+      }));
+      await supabase.from("auto_rules").insert(toInsert);
+      setAutoRules(DEFAULT_RULES);
+    }
+
+    // Load invoices
+    const { data: dbInvs } = await supabase
+      .from("invoices")
+      .select("*")
+      .order("imported_at", { ascending: false });
+
+    setInvoices(dbInvs || []);
+    setDataLoading(false);
+  }
+
+  // ── Import OFX ─────────────────────────────────────────────────────────────
+  const handleFile = useCallback(async (file) => {
+    if (!file || !user) return;
+    const text = await file.text();
+    const txs = parseOFX(text, autoRules);
+    const total = txs.reduce((s, t) => s + t.amount, 0);
+
+    // Create invoice
+    const { data: inv } = await supabase
+      .from("invoices")
+      .insert({
+        user_id: user.id,
+        name: file.name.replace(/\.ofx$/i, ""),
+        total,
+        transaction_count: txs.length,
+      })
+      .select()
+      .single();
+
+    if (!inv) return;
+
+    // Insert transactions
+    const rows = txs.map(t => ({
+      user_id: user.id,
+      invoice_id: inv.id,
+      fit_id: t.fit_id,
+      memo: t.memo,
+      amount: t.amount,
+      date: t.date,
+      category: t.category,
+      auto_categorized: t.auto,
+    }));
+
+    const { data: inserted } = await supabase
+      .from("transactions")
+      .insert(rows)
+      .select();
+
+    if (inserted) {
+      setTransactions(inserted.map(t => ({
+        id: t.id,
+        fit_id: t.fit_id,
+        memo: t.memo,
+        amount: Number(t.amount),
+        date: t.date,
+        category: t.category,
+        auto: t.auto_categorized,
+      })));
+    }
+
+    setCurrentInvoice(inv);
+    setInvoices(prev => [inv, ...prev]);
+    setFilter("all");
+    setSearch("");
+    setActiveTab("lancamentos");
+  }, [user, autoRules]);
+
+  // ── Load invoice transactions ──────────────────────────────────────────────
+  const loadInvoice = async (inv) => {
+    const { data } = await supabase
+      .from("transactions")
+      .select("*")
+      .eq("invoice_id", inv.id)
+      .order("created_at");
+
+    if (data) {
+      setTransactions(data.map(t => ({
+        id: t.id,
+        fit_id: t.fit_id,
+        memo: t.memo,
+        amount: Number(t.amount),
+        date: t.date,
+        category: t.category,
+        auto: t.auto_categorized,
+      })));
+    }
+
+    setCurrentInvoice(inv);
+    setFilter("all");
+    setSearch("");
+    setActiveTab("lancamentos");
+  };
+
+  // ── Delete invoice ─────────────────────────────────────────────────────────
+  const deleteInvoice = async (invoiceId) => {
+    await supabase.from("invoices").delete().eq("id", invoiceId);
+    setInvoices(prev => prev.filter(i => i.id !== invoiceId));
+    if (currentInvoice?.id === invoiceId) {
+      setCurrentInvoice(null);
+      setTransactions([]);
+    }
+  };
+
+  // ── Update category on transaction ─────────────────────────────────────────
+  const setCategory = async (txId, cat) => {
+    setTransactions(prev => prev.map(t => t.id === txId ? { ...t, category: cat } : t));
+    await supabase
+      .from("transactions")
+      .update({ category: cat })
+      .eq("id", txId);
+  };
+
+  // ── Add category ───────────────────────────────────────────────────────────
+  const addCategory = async (name) => {
     if (categories.find(c => c.name === name)) return;
-    const color = TAG_COLORS[categories.length % TAG_COLORS.length];
-    setCategories(prev => [...prev, { name, color }]);
+    const colorIndex = categories.length % TAG_COLORS.length;
+
+    const { data } = await supabase
+      .from("categories")
+      .insert({ user_id: user.id, name, color_index: colorIndex })
+      .select()
+      .single();
+
+    if (data) {
+      setCategories(prev => [...prev, {
+        id: data.id,
+        name: data.name,
+        color: TAG_COLORS[data.color_index % TAG_COLORS.length],
+        colorIndex: data.color_index,
+      }]);
+    }
   };
 
-  const setCategory = (id, cat) => {
-    setTransactions(prev => prev.map(t => t.id === id ? { ...t, category: cat } : t));
+  // ── Logout ─────────────────────────────────────────────────────────────────
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    setUser(null);
+    setTransactions([]);
+    setCategories([]);
+    setInvoices([]);
+    setCurrentInvoice(null);
   };
 
+  // ── Derived ────────────────────────────────────────────────────────────────
   const filtered = transactions.filter(t => {
     const matchSearch = t.memo.toLowerCase().includes(search.toLowerCase());
     const matchFilter = filter === "all" || (filter === "sem" && !t.category) || t.category === filter;
@@ -476,30 +770,60 @@ export default function App() {
     setActiveTab("lancamentos");
   };
 
-  if (!uploaded) {
+  // ── Render: loading ────────────────────────────────────────────────────────
+  if (authLoading) {
     return (
-      <div style={S.page}>
-        <div style={S.uploadWrap}>
-          <div style={{ fontSize: 52, marginBottom: 8 }}>💳</div>
-          <h1 style={S.uploadTitle}>Categorizador de Fatura</h1>
-          <p style={{ color: "#64748b", margin: "0 0 24px", fontSize: 15 }}>
-            Importe um arquivo <strong>.OFX</strong> para começar
-          </p>
-          <label style={S.uploadBtn}>
-            📂 Escolher arquivo .OFX
-            <input type="file" accept=".ofx" style={{ display: "none" }} onChange={e => handleFile(e.target.files?.[0])} />
-          </label>
+      <div style={{ ...S.page, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ textAlign: "center", color: "#64748b" }}>
+          <div style={{ fontSize: 40, marginBottom: 12 }}>💳</div>
+          <p style={{ fontSize: 15 }}>Carregando...</p>
         </div>
       </div>
     );
   }
 
+  // ── Render: auth ───────────────────────────────────────────────────────────
+  if (!user) return <Auth />;
+
+  // ── Render: invoice list ───────────────────────────────────────────────────
+  if (!currentInvoice) {
+    return (
+      <div style={S.page}>
+        {/* Top bar */}
+        <div style={{
+          background: "#fff", borderBottom: "1px solid #e2e8f0",
+          padding: "12px 20px", display: "flex", alignItems: "center", justifyContent: "space-between",
+        }}>
+          <span style={{ fontWeight: 800, fontSize: 16, color: "#0f172a" }}>💳 Categorizador de Fatura</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <span style={{ fontSize: 12, color: "#94a3b8" }}>{user.email}</span>
+            <button onClick={handleLogout} style={{
+              background: "transparent", border: "1px solid #e2e8f0", borderRadius: 8,
+              padding: "6px 14px", cursor: "pointer", fontSize: 12, fontWeight: 600, color: "#64748b",
+            }}>Sair</button>
+          </div>
+        </div>
+        <InvoiceHistory
+          invoices={invoices}
+          loading={dataLoading}
+          onSelect={loadInvoice}
+          onNew={handleFile}
+          onDelete={deleteInvoice}
+        />
+      </div>
+    );
+  }
+
+  // ── Render: invoice view ───────────────────────────────────────────────────
   return (
     <div style={S.page}>
       {/* Header */}
       <div style={S.header}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-          <span style={{ fontWeight: 800, fontSize: 16, color: "#0f172a" }}>💳 Categorizador de Fatura</span>
+          <button onClick={() => { setCurrentInvoice(null); setTransactions([]); }}
+            style={{ background: "transparent", border: "none", cursor: "pointer", fontSize: 18, color: "#64748b", padding: "0 4px" }}
+            title="Voltar">←</button>
+          <span style={{ fontWeight: 800, fontSize: 16, color: "#0f172a" }}>💳 {currentInvoice.name || "Fatura"}</span>
           <span style={S.chip}>{transactions.length} lançamentos</span>
           {semCategoria > 0 && (
             <span style={{ ...S.chip, background: "#fff7ed", color: "#c2410c", border: "1px solid #fed7aa" }}>
@@ -513,6 +837,10 @@ export default function App() {
             📂 Nova fatura
             <input type="file" accept=".ofx" style={{ display: "none" }} onChange={e => handleFile(e.target.files?.[0])} />
           </label>
+          <button onClick={handleLogout} style={{
+            background: "transparent", border: "1px solid #e2e8f0", borderRadius: 8,
+            padding: "6px 14px", cursor: "pointer", fontSize: 12, fontWeight: 600, color: "#64748b",
+          }}>Sair</button>
         </div>
       </div>
 
@@ -532,7 +860,7 @@ export default function App() {
         ))}
       </div>
 
-      {/* ── Tab: Lançamentos ── */}
+      {/* Tab: Lançamentos */}
       {activeTab === "lancamentos" && (
         <>
           <div style={S.filterBar}>
@@ -605,7 +933,7 @@ export default function App() {
         </>
       )}
 
-      {/* ── Tab: Dashboard ── */}
+      {/* Tab: Dashboard */}
       {activeTab === "dashboard" && (
         <Dashboard transactions={transactions} categories={categories} onFilterClick={handleDashFilterClick} />
       )}
@@ -613,11 +941,9 @@ export default function App() {
   );
 }
 
+// ─── Styles ──────────────────────────────────────────────────────────────────
 const S = {
   page: { minHeight: "100vh", background: "#f8fafc", fontFamily: "'Segoe UI', system-ui, sans-serif" },
-  uploadWrap: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100vh", textAlign: "center", padding: 24 },
-  uploadTitle: { margin: "0 0 8px", fontSize: 26, fontWeight: 800, color: "#0f172a" },
-  uploadBtn: { display: "inline-block", background: "#3b82f6", color: "#fff", padding: "12px 28px", borderRadius: 10, cursor: "pointer", fontWeight: 700, fontSize: 15 },
   header: { background: "#fff", borderBottom: "1px solid #e2e8f0", padding: "12px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, position: "sticky", top: 0, zIndex: 100 },
   chip: { background: "#f1f5f9", color: "#64748b", border: "1px solid #e2e8f0", padding: "3px 10px", borderRadius: 20, fontSize: 12, fontWeight: 600 },
   newBtn: { display: "inline-block", background: "#f1f5f9", color: "#334155", border: "1px solid #e2e8f0", padding: "7px 16px", borderRadius: 8, cursor: "pointer", fontWeight: 600, fontSize: 13 },
