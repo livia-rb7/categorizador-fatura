@@ -80,6 +80,14 @@ const DEFAULT_CATEGORIES = [
   { name: "Viagem", colorIndex: 0 },
 ];
 
+const DEFAULT_PURCHASE_CATEGORIES = [
+  { name: "Estrutura", colorIndex: 2 },
+  { name: "Operacional", colorIndex: 6 },
+  { name: "Material de escritório", colorIndex: 4 },
+  { name: "Viagem", colorIndex: 0 },
+  { name: "Educação", colorIndex: 3 },
+];
+
 // ─── Colors ──────────────────────────────────────────────────────────────────
 const TAG_COLORS = [
   { bg: "#fee2e2", text: "#991b1b", border: "#fca5a5" },
@@ -530,11 +538,16 @@ export default function App() {
   const [invoices, setInvoices] = useState([]);
   const [currentInvoice, setCurrentInvoice] = useState(null);
   const [dataLoading, setDataLoading] = useState(false);
+  const [purchaseCategories, setPurchaseCategories] = useState([]);
+  const [purchaseItems, setPurchaseItems] = useState([]);
 
   // UI
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [activeTab, setActiveTab] = useState("lancamentos");
+  const [showPending, setShowPending] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
+  const [pendingToImport, setPendingToImport] = useState(null);
 
   // ── Auth listener ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -611,6 +624,39 @@ export default function App() {
       setAutoRules(DEFAULT_RULES);
     }
 
+    // Load purchase item categories
+    const { data: dbPurCats } = await supabase
+      .from("purchase_item_categories")
+      .select("*")
+      .order("created_at");
+
+    if (dbPurCats && dbPurCats.length > 0) {
+      setPurchaseCategories(dbPurCats.map(c => ({
+        id: c.id,
+        name: c.name,
+        color: TAG_COLORS[c.color_index % TAG_COLORS.length],
+        colorIndex: c.color_index,
+      })));
+    } else {
+      const toInsert = DEFAULT_PURCHASE_CATEGORIES.map(c => ({
+        user_id: user.id,
+        name: c.name,
+        color_index: c.colorIndex,
+      }));
+      const { data: inserted } = await supabase
+        .from("purchase_item_categories")
+        .insert(toInsert)
+        .select();
+      if (inserted) {
+        setPurchaseCategories(inserted.map(c => ({
+          id: c.id,
+          name: c.name,
+          color: TAG_COLORS[c.color_index % TAG_COLORS.length],
+          colorIndex: c.color_index,
+        })));
+      }
+    }
+
     // Load invoices
     const { data: dbInvs } = await supabase
       .from("invoices")
@@ -618,7 +664,70 @@ export default function App() {
       .order("imported_at", { ascending: false });
 
     setInvoices(dbInvs || []);
+
+    // Count pending purchase items (no invoice)
+    const { count } = await supabase
+      .from("purchase_items")
+      .select("*", { count: "exact", head: true })
+      .is("invoice_id", null);
+    setPendingCount(count || 0);
+
     setDataLoading(false);
+  }
+
+  // ── Purchase items CRUD ────────────────────────────────────────────────────
+  // invoiceId === null → carrega itens pendentes (sem fatura)
+  async function loadPurchaseItems(invoiceId) {
+    let q = supabase.from("purchase_items").select("*").order("created_at");
+    q = invoiceId ? q.eq("invoice_id", invoiceId) : q.is("invoice_id", null);
+    const { data } = await q;
+    setPurchaseItems(data || []);
+  }
+
+  async function addPurchaseItem({ description, amount, category, month, purchaseDate, paymentMethod }) {
+    const { data } = await supabase
+      .from("purchase_items")
+      .insert({
+        user_id: user.id,
+        invoice_id: currentInvoice ? currentInvoice.id : null,
+        description,
+        amount: amount === "" || amount == null ? null : Number(amount),
+        category: category || null,
+        month: month || null,
+        purchase_date: purchaseDate || null,
+        payment_method: paymentMethod || null,
+      })
+      .select()
+      .single();
+    if (data) setPurchaseItems(prev => [...prev, data]);
+  }
+
+  async function updatePurchaseItem(id, fields) {
+    setPurchaseItems(prev => prev.map(it => it.id === id ? { ...it, ...fields } : it));
+    await supabase.from("purchase_items").update(fields).eq("id", id);
+  }
+
+  async function deletePurchaseItem(id) {
+    setPurchaseItems(prev => prev.filter(it => it.id !== id));
+    await supabase.from("purchase_items").delete().eq("id", id);
+  }
+
+  async function addPurchaseCategory(name) {
+    if (purchaseCategories.find(c => c.name === name)) return;
+    const colorIndex = purchaseCategories.length % TAG_COLORS.length;
+    const { data } = await supabase
+      .from("purchase_item_categories")
+      .insert({ user_id: user.id, name, color_index: colorIndex })
+      .select()
+      .single();
+    if (data) {
+      setPurchaseCategories(prev => [...prev, {
+        id: data.id,
+        name: data.name,
+        color: TAG_COLORS[data.color_index % TAG_COLORS.length],
+        colorIndex: data.color_index,
+      }]);
+    }
   }
 
   // ── Import OFX ─────────────────────────────────────────────────────────────
@@ -671,12 +780,46 @@ export default function App() {
       })));
     }
 
+    // Busca itens pendentes pra exibir no modal de seleção
+    const { data: pending } = await supabase
+      .from("purchase_items")
+      .select("*")
+      .is("invoice_id", null)
+      .eq("user_id", user.id)
+      .order("month", { ascending: false })
+      .order("created_at");
+
     setCurrentInvoice(inv);
     setInvoices(prev => [inv, ...prev]);
+    setPurchaseItems([]);
     setFilter("all");
     setSearch("");
     setActiveTab("lancamentos");
+
+    if (pending && pending.length > 0) {
+      setPendingToImport(pending);
+    }
   }, [user, autoRules]);
+
+  // Atrela itens pendentes selecionados à fatura atual
+  async function attachSelectedPending(itemIds) {
+    if (!currentInvoice || itemIds.length === 0) {
+      setPendingToImport(null);
+      return;
+    }
+    const { data } = await supabase
+      .from("purchase_items")
+      .update({ invoice_id: currentInvoice.id })
+      .in("id", itemIds)
+      .select();
+
+    if (data) {
+      setPurchaseItems(prev => [...prev, ...data]);
+      setPendingCount(c => Math.max(0, c - data.length));
+      setActiveTab("compras");
+    }
+    setPendingToImport(null);
+  }
 
   // ── Load invoice transactions ──────────────────────────────────────────────
   const loadInvoice = async (inv) => {
@@ -699,6 +842,7 @@ export default function App() {
     }
 
     setCurrentInvoice(inv);
+    await loadPurchaseItems(inv.id);
     setFilter("all");
     setSearch("");
     setActiveTab("lancamentos");
@@ -785,6 +929,36 @@ export default function App() {
   // ── Render: auth ───────────────────────────────────────────────────────────
   if (!user) return <Auth />;
 
+  // ── Render: pending purchases (no invoice) ─────────────────────────────────
+  if (showPending) {
+    return (
+      <div style={S.page}>
+        <div style={S.header}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flex: 1 }}>
+            <button onClick={async () => { setShowPending(false); setPurchaseItems([]); const { count } = await supabase.from("purchase_items").select("*", { count: "exact", head: true }).is("invoice_id", null); setPendingCount(count || 0); }}
+              style={{ background: "transparent", border: "none", cursor: "pointer", fontSize: 18, color: "#64748b", padding: "0 4px", flexShrink: 0 }}
+              title="Voltar">←</button>
+            <span style={{ fontWeight: 800, fontSize: 16, color: "#0f172a" }}>🛒 Compras pendentes</span>
+            <span style={{ ...S.chip, flexShrink: 0 }}>aguardando próxima fatura</span>
+          </div>
+          <button onClick={handleLogout} style={{
+            background: "transparent", border: "1px solid #e2e8f0", borderRadius: 8,
+            padding: "6px 14px", cursor: "pointer", fontSize: 12, fontWeight: 600, color: "#64748b",
+          }}>Sair</button>
+        </div>
+        <PurchaseItemsTab
+          items={purchaseItems}
+          categories={purchaseCategories}
+          onAdd={addPurchaseItem}
+          onUpdate={updatePurchaseItem}
+          onDelete={deletePurchaseItem}
+          onAddCategory={addPurchaseCategory}
+          isPending={true}
+        />
+      </div>
+    );
+  }
+
   // ── Render: invoice list ───────────────────────────────────────────────────
   if (!currentInvoice) {
     return (
@@ -796,6 +970,14 @@ export default function App() {
         }}>
           <span style={{ fontWeight: 800, fontSize: 16, color: "#0f172a" }}>💳 Categorizador de Fatura</span>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <button onClick={async () => { await loadPurchaseItems(null); setShowPending(true); }} style={{
+              background: pendingCount > 0 ? "#eff6ff" : "transparent",
+              border: "1px solid " + (pendingCount > 0 ? "#bfdbfe" : "#e2e8f0"),
+              borderRadius: 8, padding: "6px 14px", cursor: "pointer",
+              fontSize: 12, fontWeight: 700, color: pendingCount > 0 ? "#1d4ed8" : "#64748b",
+            }}>
+              🛒 Compras pendentes{pendingCount > 0 ? ` (${pendingCount})` : ""}
+            </button>
             <span style={{ fontSize: 12, color: "#94a3b8" }}>{user.email}</span>
             <button onClick={handleLogout} style={{
               background: "transparent", border: "1px solid #e2e8f0", borderRadius: 8,
@@ -849,6 +1031,7 @@ export default function App() {
         {[
           { key: "lancamentos", label: "📋  Lançamentos" },
           { key: "dashboard",   label: "📊  Dashboard" },
+          { key: "compras",     label: "🛒  Compras" },
         ].map(({ key, label }) => (
           <button key={key} onClick={() => setActiveTab(key)} style={{
             padding: "12px 18px", background: "transparent", border: "none",
@@ -937,6 +1120,322 @@ export default function App() {
       {activeTab === "dashboard" && (
         <Dashboard transactions={transactions} categories={categories} onFilterClick={handleDashFilterClick} />
       )}
+
+      {/* Tab: Compras */}
+      {activeTab === "compras" && (
+        <PurchaseItemsTab
+          items={purchaseItems}
+          categories={purchaseCategories}
+          onAdd={addPurchaseItem}
+          onUpdate={updatePurchaseItem}
+          onDelete={deletePurchaseItem}
+          onAddCategory={addPurchaseCategory}
+          isPending={false}
+        />
+      )}
+
+      {/* Modal: selecionar pendentes ao importar */}
+      {pendingToImport && (
+        <PendingImportModal
+          items={pendingToImport}
+          onConfirm={attachSelectedPending}
+          onCancel={() => setPendingToImport(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Helpers month ───────────────────────────────────────────────────────────
+function currentMonth() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+function formatMonth(ym) {
+  if (!ym) return "Sem mês";
+  const [y, m] = ym.split("-");
+  const names = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
+  return `${names[Number(m) - 1]}/${y}`;
+}
+
+// ─── PurchaseItemsTab ────────────────────────────────────────────────────────
+function PurchaseItemsTab({ items, categories, onAdd, onUpdate, onDelete, onAddCategory, isPending }) {
+  const [description, setDescription] = useState("");
+  const [amount, setAmount] = useState("");
+  const [category, setCategory] = useState(null);
+  const [month, setMonth] = useState(currentMonth());
+  const [purchaseDate, setPurchaseDate] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState("");
+
+  const handleAdd = () => {
+    const desc = description.trim();
+    if (!desc) return;
+    onAdd({
+      description: desc, amount, category,
+      month: isPending ? month : null,
+      purchaseDate, paymentMethod,
+    });
+    setDescription(""); setAmount(""); setCategory(null);
+    setPurchaseDate(""); setPaymentMethod("");
+  };
+
+  // Agrupa por mês quando view de pendentes
+  const grouped = isPending
+    ? items.reduce((acc, it) => {
+        const k = it.month || "";
+        (acc[k] = acc[k] || []).push(it);
+        return acc;
+      }, {})
+    : { "": items };
+  const groupKeys = Object.keys(grouped).sort((a, b) => b.localeCompare(a));
+
+  return (
+    <div style={{ padding: 20 }}>
+      <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: 16, marginBottom: 16 }}>
+        <div style={{ fontWeight: 700, fontSize: 13, color: "#0f172a", marginBottom: 10 }}>
+          Adicionar item de compra
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <input
+            type="date" value={purchaseDate}
+            onChange={e => setPurchaseDate(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") handleAdd(); }}
+            title="Data da compra"
+            style={{ width: 145, border: "1px solid #e2e8f0", borderRadius: 8, padding: "8px 12px", fontSize: 13, outline: "none", color: "#334155", background: "#f8fafc" }}
+          />
+          <input
+            value={description}
+            onChange={e => setDescription(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") handleAdd(); }}
+            placeholder="O que você comprou?"
+            style={{ flex: "1 1 200px", border: "1px solid #e2e8f0", borderRadius: 8, padding: "8px 12px", fontSize: 13, outline: "none", color: "#334155", background: "#f8fafc" }}
+          />
+          <input
+            value={paymentMethod}
+            onChange={e => setPaymentMethod(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") handleAdd(); }}
+            placeholder="Forma de pagamento"
+            style={{ width: 160, border: "1px solid #e2e8f0", borderRadius: 8, padding: "8px 12px", fontSize: 13, outline: "none", color: "#334155", background: "#f8fafc" }}
+          />
+          <input
+            value={amount}
+            onChange={e => setAmount(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") handleAdd(); }}
+            type="number" step="0.01" placeholder="Valor (opcional)"
+            style={{ width: 130, border: "1px solid #e2e8f0", borderRadius: 8, padding: "8px 12px", fontSize: 13, outline: "none", color: "#334155", background: "#f8fafc" }}
+          />
+          <TagSelector
+            value={category} categories={categories}
+            onChange={setCategory} onAddCategory={onAddCategory}
+          />
+          {isPending && (
+            <input
+              type="month" value={month} onChange={e => setMonth(e.target.value)}
+              style={{ border: "1px solid #e2e8f0", borderRadius: 8, padding: "8px 12px", fontSize: 13, outline: "none", color: "#334155", background: "#f8fafc" }}
+              title="Mês"
+            />
+          )}
+          <button onClick={handleAdd} disabled={!description.trim()}
+            style={{ background: "#3b82f6", color: "#fff", border: "none", borderRadius: 8, padding: "8px 16px", fontWeight: 700, fontSize: 13, cursor: description.trim() ? "pointer" : "not-allowed", opacity: description.trim() ? 1 : 0.5 }}>
+            + Adicionar
+          </button>
+        </div>
+        <p style={{ margin: "10px 0 0", fontSize: 11, color: "#94a3b8" }}>
+          💡 Itens aqui são anotações — não entram em totais nem no dashboard.
+          {isPending && " Ao importar uma fatura, você poderá selecionar quais itens incluir."}
+        </p>
+      </div>
+
+      {groupKeys.map(gk => {
+        const groupItems = grouped[gk];
+        return (
+          <div key={gk || "single"} style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, overflow: "hidden", marginBottom: 12 }}>
+            <div style={{ padding: "14px 18px", borderBottom: "1px solid #f1f5f9", display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+              <span style={{ fontWeight: 700, fontSize: 13, color: "#0f172a" }}>
+                {isPending ? `📅 ${formatMonth(gk)}` : "Itens desta fatura"}
+              </span>
+              <span style={{ fontSize: 12, color: "#94a3b8" }}>
+                {groupItems.length} {groupItems.length === 1 ? "item" : "itens"}
+              </span>
+            </div>
+
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  <th style={{ ...S.th, width: 130 }}>Data</th>
+                  <th style={{ ...S.th }}>Descrição</th>
+                  <th style={{ ...S.th, width: 150 }}>Pagamento</th>
+                  <th style={{ ...S.th, textAlign: "right", width: 120 }}>Valor</th>
+                  <th style={{ ...S.th, width: 200 }}>Categoria</th>
+                  <th style={{ ...S.th, width: 50 }}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {groupItems.map(it => (
+                  <tr key={it.id} style={S.row}
+                    onMouseEnter={e => e.currentTarget.style.background = "#f8fafc"}
+                    onMouseLeave={e => e.currentTarget.style.background = "#fff"}>
+                    <td style={S.td}>
+                      <input
+                        type="date" defaultValue={it.purchase_date ?? ""}
+                        onBlur={e => { const v = e.target.value || null; if (v !== it.purchase_date) onUpdate(it.id, { purchase_date: v }); }}
+                        style={{ width: 130, border: "1px solid transparent", background: "transparent", fontSize: 13, color: "#334155", outline: "none", borderRadius: 6, padding: "4px 6px" }}
+                        onFocus={e => e.target.style.borderColor = "#e2e8f0"}
+                      />
+                    </td>
+                    <td style={S.td}>
+                      <input
+                        defaultValue={it.description}
+                        onBlur={e => { const v = e.target.value.trim(); if (v && v !== it.description) onUpdate(it.id, { description: v }); }}
+                        style={{ width: "100%", border: "none", background: "transparent", fontSize: 13, color: "#1e293b", fontWeight: 500, outline: "none" }}
+                      />
+                    </td>
+                    <td style={S.td}>
+                      <input
+                        defaultValue={it.payment_method ?? ""}
+                        onBlur={e => { const v = e.target.value.trim() || null; if (v !== it.payment_method) onUpdate(it.id, { payment_method: v }); }}
+                        placeholder="—"
+                        style={{ width: "100%", border: "1px solid transparent", background: "transparent", fontSize: 13, color: "#334155", outline: "none", borderRadius: 6, padding: "4px 6px" }}
+                        onFocus={e => e.target.style.borderColor = "#e2e8f0"}
+                      />
+                    </td>
+                    <td style={{ ...S.td, textAlign: "right" }}>
+                      <input
+                        type="number" step="0.01"
+                        defaultValue={it.amount ?? ""}
+                        onBlur={e => {
+                          const raw = e.target.value;
+                          const v = raw === "" ? null : Number(raw);
+                          if (v !== it.amount) onUpdate(it.id, { amount: v });
+                        }}
+                        placeholder="—"
+                        style={{ width: 100, textAlign: "right", border: "1px solid transparent", background: "transparent", fontSize: 13, color: "#0f172a", fontWeight: 700, outline: "none", borderRadius: 6, padding: "4px 6px" }}
+                        onFocus={e => e.target.style.borderColor = "#e2e8f0"}
+                        onBlurCapture={e => e.target.style.borderColor = "transparent"}
+                      />
+                    </td>
+                    <td style={S.td}>
+                      <TagSelector
+                        value={it.category} categories={categories}
+                        onChange={(cat) => onUpdate(it.id, { category: cat })}
+                        onAddCategory={onAddCategory}
+                      />
+                    </td>
+                    <td style={S.td}>
+                      <button onClick={() => onDelete(it.id)}
+                        style={{ background: "transparent", border: "none", cursor: "pointer", color: "#cbd5e1", fontSize: 14, padding: "4px 8px", borderRadius: 6 }}
+                        onMouseEnter={e => e.currentTarget.style.color = "#ef4444"}
+                        onMouseLeave={e => e.currentTarget.style.color = "#cbd5e1"}
+                        title="Excluir">✕</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        );
+      })}
+
+      {items.length === 0 && (
+        <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: "48px 24px", textAlign: "center", color: "#94a3b8" }}>
+          <div style={{ fontSize: 36, marginBottom: 8 }}>🛒</div>
+          <p style={{ margin: 0, fontSize: 14 }}>Nenhum item lançado ainda</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Modal: selecionar pendentes ao importar ─────────────────────────────────
+function PendingImportModal({ items, onConfirm, onCancel }) {
+  const [selected, setSelected] = useState(() => new Set(items.map(i => i.id)));
+
+  const toggle = (id) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const grouped = items.reduce((acc, it) => {
+    const k = it.month || "";
+    (acc[k] = acc[k] || []).push(it);
+    return acc;
+  }, {});
+  const groupKeys = Object.keys(grouped).sort((a, b) => b.localeCompare(a));
+
+  const toggleGroup = (gk) => {
+    const ids = grouped[gk].map(i => i.id);
+    const allSelected = ids.every(id => selected.has(id));
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (allSelected) ids.forEach(id => next.delete(id));
+      else ids.forEach(id => next.add(id));
+      return next;
+    });
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", zIndex: 10000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <div style={{ background: "#fff", borderRadius: 14, maxWidth: 640, width: "100%", maxHeight: "85vh", display: "flex", flexDirection: "column", boxShadow: "0 24px 60px rgba(0,0,0,0.25)" }}>
+        <div style={{ padding: "20px 24px", borderBottom: "1px solid #e2e8f0" }}>
+          <h2 style={{ margin: "0 0 4px", fontSize: 18, fontWeight: 800, color: "#0f172a" }}>🛒 Importar compras pendentes</h2>
+          <p style={{ margin: 0, fontSize: 13, color: "#64748b" }}>
+            Selecione quais itens incluir nesta fatura. Os não selecionados continuam pendentes.
+          </p>
+        </div>
+
+        <div style={{ overflowY: "auto", padding: "12px 24px", flex: 1 }}>
+          {groupKeys.map(gk => {
+            const groupItems = grouped[gk];
+            const allSelected = groupItems.every(i => selected.has(i.id));
+            return (
+              <div key={gk || "single"} style={{ marginBottom: 16 }}>
+                <div onClick={() => toggleGroup(gk)} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", cursor: "pointer", borderBottom: "1px solid #f1f5f9", marginBottom: 4 }}>
+                  <input type="checkbox" checked={allSelected} readOnly style={{ cursor: "pointer" }} />
+                  <span style={{ fontWeight: 700, fontSize: 13, color: "#0f172a" }}>📅 {formatMonth(gk)}</span>
+                  <span style={{ fontSize: 11, color: "#94a3b8" }}>({groupItems.length})</span>
+                </div>
+                {groupItems.map(it => (
+                  <label key={it.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 6px", cursor: "pointer", borderRadius: 6 }}
+                    onMouseEnter={e => e.currentTarget.style.background = "#f8fafc"}
+                    onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                    <input type="checkbox" checked={selected.has(it.id)} onChange={() => toggle(it.id)} style={{ cursor: "pointer" }} />
+                    {it.purchase_date && (
+                      <span style={{ fontSize: 11, color: "#94a3b8", fontVariantNumeric: "tabular-nums", minWidth: 70 }}>
+                        {it.purchase_date.split("-").reverse().join("/")}
+                      </span>
+                    )}
+                    <span style={{ flex: 1, fontSize: 13, color: "#1e293b" }}>{it.description}</span>
+                    {it.payment_method && (
+                      <span style={{ fontSize: 11, color: "#64748b" }}>{it.payment_method}</span>
+                    )}
+                    {it.category && (
+                      <span style={{ fontSize: 11, color: "#64748b", background: "#f1f5f9", padding: "2px 8px", borderRadius: 12 }}>{it.category}</span>
+                    )}
+                    {it.amount != null && (
+                      <span style={{ fontSize: 12, fontWeight: 700, color: "#0f172a", fontVariantNumeric: "tabular-nums" }}>{fmt(Number(it.amount))}</span>
+                    )}
+                  </label>
+                ))}
+              </div>
+            );
+          })}
+        </div>
+
+        <div style={{ padding: "16px 24px", borderTop: "1px solid #e2e8f0", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ fontSize: 12, color: "#64748b" }}>{selected.size} de {items.length} selecionados</span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={onCancel} style={{ background: "transparent", border: "1px solid #e2e8f0", borderRadius: 8, padding: "8px 16px", fontWeight: 600, fontSize: 13, color: "#64748b", cursor: "pointer" }}>
+              Pular
+            </button>
+            <button onClick={() => onConfirm([...selected])} style={{ background: "#3b82f6", color: "#fff", border: "none", borderRadius: 8, padding: "8px 18px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+              Importar selecionados
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

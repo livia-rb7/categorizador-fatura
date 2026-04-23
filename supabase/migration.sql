@@ -104,9 +104,44 @@ create policy "Users manage own transactions"
   on public.transactions for all
   using (auth.uid() = user_id);
 
--- 6. Indexes
+-- 6. Purchase item categories (separate from transaction categories)
+create table public.purchase_item_categories (
+  id uuid default gen_random_uuid() primary key,
+  user_id uuid references auth.users on delete cascade not null,
+  name text not null,
+  color_index int not null default 0,
+  created_at timestamptz default now(),
+  unique(user_id, name)
+);
+
+alter table public.purchase_item_categories enable row level security;
+
+create policy "Users manage own purchase categories"
+  on public.purchase_item_categories for all
+  using (auth.uid() = user_id);
+
+-- 7. Purchase items (notes per invoice — do not affect totals)
+create table public.purchase_items (
+  id uuid default gen_random_uuid() primary key,
+  user_id uuid references auth.users on delete cascade not null,
+  invoice_id uuid references public.invoices on delete cascade not null,
+  description text not null,
+  amount numeric,
+  category text,
+  created_at timestamptz default now()
+);
+
+alter table public.purchase_items enable row level security;
+
+create policy "Users manage own purchase items"
+  on public.purchase_items for all
+  using (auth.uid() = user_id);
+
+-- 8. Indexes
 create index idx_transactions_user on public.transactions (user_id);
 create index idx_transactions_invoice on public.transactions (invoice_id);
 create index idx_categories_user on public.categories (user_id);
 create index idx_invoices_user on public.invoices (user_id);
 create index idx_auto_rules_user on public.auto_rules (user_id);
+create index idx_purchase_items_invoice on public.purchase_items (invoice_id);
+create index idx_purchase_item_categories_user on public.purchase_item_categories (user_id);
